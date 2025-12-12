@@ -348,10 +348,15 @@
       // ตัวอย่าง: https://script.google.com/macros/s/AKfycbxxxxxxxxxxxxxxxxxxxx/exec
       const API_URL = "https://script.google.com/macros/s/AKfycby8yW6HSiy-ryBw7cy8anLvPkZwZuGDJE7jAc1QR69nkDqMGvh-JCSGwTtLqUSuXr74/exec";
 
+      // ปรับได้ตามสภาพหน้างาน: มือถือ/เน็ตช้าแนะนำ 15–25 วินาที
+      const JSONP_TIMEOUT_MS = 20000;
+
       // เก็บ state ป้องกันการตอบกลับซ้อน (กรณีกดหลายครั้งเร็ว ๆ)
       let activeRequestId = 0;
       let jsonpScriptEl = null;
       let jsonpTimeout = null;
+      let statusInterval = null;
+      let requestStartedAt = 0;
 
       const codeInput = document.getElementById("codeInput");
       const checkBtn = document.getElementById("checkBtn");
@@ -396,10 +401,27 @@
         codeInput.disabled = isBusy;
       }
 
+      function isApiConfigured() {
+        return !(API_URL.includes("/XXXX/exec") || API_URL.endsWith("/XXXX/exec") || API_URL.includes("XXXX/exec"));
+      }
+
+      function apiShort() {
+        try {
+          const u = new URL(API_URL);
+          return u.host + u.pathname;
+        } catch (_) {
+          return API_URL;
+        }
+      }
+
       function clearJsonp() {
         if (jsonpTimeout) {
           clearTimeout(jsonpTimeout);
           jsonpTimeout = null;
+        }
+        if (statusInterval) {
+          clearInterval(statusInterval);
+          statusInterval = null;
         }
         if (jsonpScriptEl && jsonpScriptEl.parentNode) {
           jsonpScriptEl.parentNode.removeChild(jsonpScriptEl);
@@ -423,7 +445,7 @@
           return;
         }
 
-        if (API_URL.includes("/XXXX/exec") || API_URL.endsWith("/XXXX/exec") || API_URL.includes("XXXX/exec")) {
+        if (!isApiConfigured()) {
           setCard({
             type: "warning",
             icon: "!",
@@ -440,7 +462,8 @@
         const requestId = activeRequestId;
 
         setBusy(true);
-        setInlineMessage("กำลังตรวจสอบ...");
+        requestStartedAt = Date.now();
+        setInlineMessage("กำลังตรวจสอบ... (0s)");
 
         clearJsonp();
 
@@ -459,6 +482,12 @@
         s.async = true;
         s.defer = true;
 
+        // อัปเดตสถานะเป็นวินาที (ให้ผู้ใช้รู้ว่ายังทำงานอยู่)
+        statusInterval = setInterval(function () {
+          const sec = Math.floor((Date.now() - requestStartedAt) / 1000);
+          setInlineMessage("กำลังตรวจสอบ... (" + sec + "s)");
+        }, 350);
+
         // ถ้าโหลด script ไม่ได้ (เช่น URL ผิด) จะเข้า onerror
         s.onerror = function () {
           if (requestId !== activeRequestId) return;
@@ -469,7 +498,9 @@
             title: "เรียก API ไม่สำเร็จ",
             codeText: normalized,
             nameText: "-",
-            noteText: "ตรวจสอบ API_URL / การ Deploy Apps Script / อินเทอร์เน็ต แล้วลองใหม่",
+            noteText:
+              "ถ้าคอมใช้ได้แต่มือถือไม่ได้: ให้ Deploy Apps Script เป็น Web app และตั้ง Who has access = Anyone (กันปัญหา third‑party cookies). API: " +
+              apiShort(),
           });
           clearJsonp();
         };
@@ -484,10 +515,11 @@
             title: "หมดเวลาในการตรวจสอบ",
             codeText: normalized,
             nameText: "-",
-            noteText: "สัญญาณเน็ตช้า หรือ API มีปัญหา ลองใหม่อีกครั้ง",
+            noteText:
+              "เน็ตมือถือช้า/Apps Script เพิ่งเริ่มทำงาน (cold start) ลองใหม่อีกครั้ง หรือใช้ Wi‑Fi. API: " + apiShort(),
           });
           clearJsonp();
-        }, 8000);
+        }, JSONP_TIMEOUT_MS);
 
         jsonpScriptEl = s;
         document.body.appendChild(s);
@@ -500,7 +532,6 @@
       window.handlePromoResult = function (result) {
         // หมายเหตุ: JSONP ไม่มี requestId แนบมา → เราใช้ activeRequestId เพื่อกันการตอบกลับจาก request เก่า
         // (ถ้ากดซ้อนเร็ว ๆ request เก่าอาจตอบกลับทีหลัง)
-        const currentRequestId = activeRequestId;
         if (!result || typeof result !== "object") {
           setBusy(false);
           setCard({
@@ -586,6 +617,22 @@
       // โฟกัส input ทันที (สะดวกในพื้นร้าน)
       window.addEventListener("load", function () {
         try { codeInput.focus(); } catch (_) {}
+
+        // JSONP warm-up: ช่วยลดหน่วงครั้งแรก (โดยเฉพาะมือถือ)
+        if (isApiConfigured()) {
+          window.handleWarmup = function (_result) {
+            // ไม่ต้องทำอะไร แค่อุ่นเครื่อง Apps Script
+          };
+
+          const warmUrl = API_URL + "?ping=1&callback=handleWarmup&_=" + Date.now();
+          const warm = document.createElement("script");
+          warm.src = warmUrl;
+          warm.async = true;
+          warm.defer = true;
+          warm.onload = function () { try { warm.remove(); } catch (_) {} };
+          warm.onerror = function () { try { warm.remove(); } catch (_) {} };
+          document.body.appendChild(warm);
+        }
       });
     </script>
   </body>
