@@ -1,0 +1,17 @@
+{
+  // Cloudflare Workers deployment for a static site (no build step)
+  // This makes `npx wrangler deploy` work in CI (Cloudflare Pages/Workers build environment).
+  "name": "promo-checker",
+  "compatibility_date": "2025-12-13",
+
+  // Upload static assets from ./public (our single-page app lives here)
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+
+  // Minimal Worker to serve assets and ensure "/" returns "/index.html"
+  "main": "./src/worker.ts"
+}
+
+
