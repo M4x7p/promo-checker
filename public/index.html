@@ -231,6 +231,16 @@
       }
       .scan-hint b { color: rgba(255,255,255,0.92); }
 
+      .scan-actions {
+        margin-top: 12px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+      .scan-actions .btn-secondary {
+        padding: 12px 14px;
+      }
+
       .field {
         position: relative;
       }
@@ -448,7 +458,7 @@
       <div class="modal-card">
         <div class="modal-head">
           <div class="modal-title">สแกนบาร์โค้ด</div>
-          <button id="scanCloseBtn" class="modal-close" type="button">ปิด</button>
+          <button id="scanCloseBtn" class="modal-close" type="button">ย้อนกลับ</button>
         </div>
         <div class="modal-body">
           <div class="video-wrap">
@@ -456,6 +466,10 @@
             <div class="scan-frame" aria-hidden="true"><div class="scan-box"></div></div>
           </div>
           <div id="scanStatus" class="scan-hint">กำลังเตรียมกล้อง…</div>
+          <div class="scan-actions">
+            <button id="scanRetryBtn" class="btn-secondary" type="button">ลองเปิดกล้องใหม่</button>
+            <button id="scanBackBtn" class="btn-secondary" type="button">ย้อนกลับ</button>
+          </div>
         </div>
       </div>
     </div>
@@ -486,6 +500,8 @@
       // ========= Scanner state =========
       const scannerModal = document.getElementById("scannerModal");
       const scanCloseBtn = document.getElementById("scanCloseBtn");
+      const scanRetryBtn = document.getElementById("scanRetryBtn");
+      const scanBackBtn = document.getElementById("scanBackBtn");
       const scannerVideo = document.getElementById("scannerVideo");
       const scanStatus = document.getElementById("scanStatus");
       let scannerStream = null;
@@ -497,7 +513,11 @@
       let zxingLoading = false;
       let scannerStopRequested = false;
       let reopenAttempts = 0;
+      let scannerStartAt = 0;
       let wakeLock = null;
+      let detectInFlight = false;
+      let usingZxing = false;
+      let lastDetectedRaw = "";
 
       /**
        * normalizeInput:
@@ -594,6 +614,13 @@
         scannerModal.classList.add("hidden");
       }
 
+      function resetScannerUi() {
+        // ทำให้ modal เปิดค้างได้แม้กล้องหลุด
+        if (scannerVideo) {
+          try { scannerVideo.poster = ""; } catch (_) {}
+        }
+      }
+
       async function requestWakeLock() {
         try {
           if (navigator.wakeLock && navigator.wakeLock.request) {
@@ -624,6 +651,28 @@
         // ถ้ามีเลขติดกัน >= 8 ให้ดึงช่วง 8 หลักแรกที่เจอ
         const m = digits.match(/\d{8}/);
         return m ? m[0] : "";
+      }
+
+      // ถ้าอ่านได้ “อะไรก็ตาม” ให้ส่งผ่านฟังก์ชันนี้ เพื่อ:
+      // - แปลงเป็นรหัส 8 หลักถ้าเป็นไปได้
+      // - ถ้าไม่ใช่ 8 หลัก ให้โชว์ว่าอ่านได้ (ช่วย debug/หน้างาน)
+      function onBarcodeCandidate(raw) {
+        lastDetectedRaw = String(raw || "");
+        const code = extract8DigitCode(lastDetectedRaw);
+        if (/^\d{8}$/.test(code)) {
+          setScanStatus("พบรหัส: " + code + " กำลังตรวจสอบ…");
+          codeInput.value = code;
+          setTimeout(() => {
+            closeScanner();
+            handleCheck();
+          }, 180);
+          return true;
+        }
+
+        if (lastDetectedRaw) {
+          setScanStatus("อ่านได้: " + lastDetectedRaw + " (ยังไม่ใช่รหัส 8 หลัก) ลองขยับให้ชัด/ใกล้ขึ้น");
+        }
+        return false;
       }
 
       async function loadZxingIfNeeded() {
@@ -731,7 +780,12 @@
 
         scannerStopRequested = false;
         reopenAttempts = 0;
+        scannerStartAt = Date.now();
+        detectInFlight = false;
+        usingZxing = false;
+        lastDetectedRaw = "";
         showScanner();
+        resetScannerUi();
         setScanStatus("กำลังขอสิทธิ์กล้อง…");
 
         try {
@@ -755,13 +809,12 @@
                 if (scannerStopRequested) return;
                 // บางเครื่อง track จะ end เองเร็ว ๆ (เช่น in-app browser/permission/OS)
                 scannerRunning = false;
-                const aliveMs = Date.now() - requestStartedAt;
-                // auto-retry 1 ครั้ง (กันกรณีเปิดแป๊บเดียวแล้วดับ)
-                if (reopenAttempts < 1) {
+                // auto-retry หลายครั้งแบบสุภาพ (กันกรณีเปิด 1–2 วิแล้วดับ)
+                if (reopenAttempts < 3) {
                   reopenAttempts += 1;
-                  setScanStatus("กล้องหลุด กำลังเปิดใหม่…");
-                  // หน่วงนิดให้ browser ปลด resource ก่อน
+                  setScanStatus("กล้องหลุด กำลังเปิดใหม่… (" + reopenAttempts + "/3)");
                   setTimeout(async () => {
+                    if (scannerStopRequested) return;
                     try {
                       if (scannerStream) {
                         try { scannerStream.getTracks().forEach((t) => t.stop()); } catch (_) {}
@@ -777,12 +830,12 @@
                       }
                     } catch (e) {
                       const m = (e && e.name) ? String(e.name) : String(e);
-                      setScanStatus("กล้องหยุดทำงานเอง และเปิดใหม่ไม่สำเร็จ: " + m + " (ลองใช้ Chrome/Safari ปกติ ไม่ใช่ in-app browser)");
+                      setScanStatus("เปิดกล้องใหม่ไม่สำเร็จ: " + m + " (กด “ลองเปิดกล้องใหม่” หรือกด “ย้อนกลับ”)");
                     }
-                  }, 220);
+                  }, 450);
                   return;
                 }
-                setScanStatus("กล้องหยุดทำงานเอง (track ended) — ลองกดสแกนใหม่ หรือเปิดผ่าน Chrome/Safari ปกติ");
+                setScanStatus("กล้องหยุดทำงานเองซ้ำ ๆ — กด “ลองเปิดกล้องใหม่” หรือเปิดผ่าน Chrome/Safari ปกติ (หลีกเลี่ยง in‑app browser)");
               };
               vt.onmute = () => {
                 // บางเครื่อง mute ชั่วคราว
@@ -802,47 +855,59 @@
               const formats = ["ean_13", "ean_8", "code_128", "upc_a", "upc_e", "qr_code"];
               detector = new BarcodeDetector({ formats });
             }
-            setScanStatus("เล็งบาร์โค้ดให้อยู่ในกรอบ แล้วรอระบบอ่าน…");
+            setScanStatus("กำลังสแกน… เล็งบาร์โค้ดให้อยู่ในกรอบ แล้วรอระบบอ่าน…");
             scanLoop();
+
+            // ถ้า BarcodeDetector อ่านไม่ติด ให้สลับไป ZXing อัตโนมัติ (ช่วยบางเครื่อง)
+            setTimeout(() => {
+              if (!scannerRunning || scannerStopRequested) return;
+              if (usingZxing) return;
+              if (!lastDetectedRaw) {
+                switchToZxing().catch(() => {});
+              }
+            }, 3500);
             return;
           }
 
           // 2) Fallback: ZXing (รองรับ iOS Safari/บราวเซอร์อื่น ๆ ที่ไม่มี BarcodeDetector)
-          setScanStatus("กำลังโหลดตัวอ่านบาร์โค้ดเพิ่มเติม…");
-          const ZX = await loadZxingIfNeeded();
-          if (!zxingReader) {
-            zxingReader = new ZX.BrowserMultiFormatReader();
-          }
-
-          setScanStatus("เล็งบาร์โค้ดให้อยู่ในกรอบ แล้วรอระบบอ่าน…");
-          // decodeFromVideoElementContinuously ใช้ video element ที่เราเปิดไว้แล้ว
-          zxingControls = await zxingReader.decodeFromVideoElementContinuously(scannerVideo, (result, err, controls) => {
-            // controls อาจส่งมาให้ใช้งาน—เก็บไว้สำหรับ stop
-            if (controls) zxingControls = controls;
-            if (!scannerRunning) return;
-
-            if (result) {
-              const raw = result.getText ? result.getText() : String(result.text || "");
-              const code = extract8DigitCode(raw);
-              if (/^\d{8}$/.test(code)) {
-                setScanStatus("พบรหัส: " + code + " กำลังตรวจสอบ…");
-                codeInput.value = code;
-                // หน่วงนิดให้ผู้ใช้เห็นว่าอ่านได้แล้ว (ลดความรู้สึกว่ากล้องดับเอง)
-                setTimeout(() => {
-                  closeScanner();
-                  handleCheck();
-                }, 180);
-              }
-            }
-            // err ปล่อยผ่านได้ (ZXing จะ throw ตอนยังหาไม่เจอเป็นปกติ)
-          });
+          await switchToZxing();
         } catch (err) {
           const msg = (err && err.name) ? String(err.name) : String(err);
-          setScanStatus("เปิดกล้องไม่สำเร็จ: " + msg + " (อนุญาตกล้องแล้วลองใหม่)");
+          // สำคัญ: ไม่ปิด modal ทิ้ง ให้ user กด “ลองใหม่/ย้อนกลับ” เอง
           scannerRunning = false;
-          // ปิด stream ถ้ามีค้าง
-          closeScanner();
+          setScanStatus("เปิดกล้องไม่สำเร็จ: " + msg + " (กด “ลองเปิดกล้องใหม่” หรือกด “ย้อนกลับ”)");
+          // เคลียร์ stream ที่ค้าง แต่ไม่ซ่อน modal
+          try {
+            if (scannerStream) scannerStream.getTracks().forEach((t) => t.stop());
+          } catch (_) {}
+          scannerStream = null;
+          releaseWakeLock();
         }
+      }
+
+      async function switchToZxing() {
+        if (!scannerRunning || scannerStopRequested) return;
+        if (usingZxing) return;
+        usingZxing = true;
+
+        setScanStatus("กำลังใช้โหมดสแกนแบบเข้ม (ZXing)…");
+        const ZX = await loadZxingIfNeeded();
+        if (!zxingReader) zxingReader = new ZX.BrowserMultiFormatReader();
+
+        // หยุดของเดิมถ้ามี
+        try {
+          if (zxingControls && typeof zxingControls.stop === "function") zxingControls.stop();
+        } catch (_) {}
+        zxingControls = null;
+
+        zxingReader.decodeFromVideoElementContinuously(scannerVideo, (result, _err, controls) => {
+          if (controls) zxingControls = controls;
+          if (!scannerRunning || scannerStopRequested) return;
+          if (result) {
+            const raw = result.getText ? result.getText() : String(result.text || "");
+            onBarcodeCandidate(raw);
+          }
+        });
       }
 
       function closeScanner() {
@@ -869,6 +934,7 @@
 
       async function scanLoop() {
         if (!scannerRunning) return;
+        if (usingZxing) return;
 
         // throttle: ไม่ต้อง detect ทุกเฟรม (ช่วยประหยัดแบต/ลื่นขึ้น)
         const now = Date.now();
@@ -879,22 +945,28 @@
         lastScanAt = now;
 
         try {
+          if (!detector) {
+            requestAnimationFrame(scanLoop);
+            return;
+          }
+          if (detectInFlight) {
+            requestAnimationFrame(scanLoop);
+            return;
+          }
           if (scannerVideo.readyState >= 2) {
+            detectInFlight = true;
             const results = await detector.detect(scannerVideo);
+            detectInFlight = false;
             if (results && results.length) {
               const raw = results[0].rawValue || "";
-              const code = extract8DigitCode(raw);
-              if (/^\d{8}$/.test(code)) {
-                // เติมรหัส + ตรวจสอบอัตโนมัติ
-                codeInput.value = code;
-                closeScanner();
-                handleCheck();
-                return;
+              if (raw) {
+                if (onBarcodeCandidate(raw)) return;
               }
             }
           }
         } catch (_err) {
           // เงียบไว้ก่อน: บางเครื่อง detect จะ throw เป็นครั้งคราว
+          detectInFlight = false;
         }
 
         requestAnimationFrame(scanLoop);
@@ -1086,6 +1158,30 @@
       checkBtn.addEventListener("click", handleCheck);
       scanBtn.addEventListener("click", openScanner);
       scanCloseBtn.addEventListener("click", closeScanner);
+      scanBackBtn.addEventListener("click", closeScanner);
+      scanRetryBtn.addEventListener("click", async function () {
+        // ไม่ปิด modal แต่พยายามเปิดกล้องใหม่
+        scannerStopRequested = false;
+        reopenAttempts = 0;
+        setScanStatus("กำลังเปิดกล้องใหม่…");
+        try {
+          if (scannerStream) {
+            try { scannerStream.getTracks().forEach((t) => t.stop()); } catch (_) {}
+            scannerStream = null;
+          }
+          await requestWakeLock();
+          scannerStream = await getBackCameraStream();
+          scannerVideo.srcObject = scannerStream;
+          await scannerVideo.play();
+          scannerRunning = true;
+          setScanStatus("เล็งบาร์โค้ดให้อยู่ในกรอบ แล้วรอระบบอ่าน…");
+          if ("BarcodeDetector" in window) scanLoop();
+        } catch (e) {
+          const m = (e && e.name) ? String(e.name) : String(e);
+          setScanStatus("เปิดกล้องใหม่ไม่สำเร็จ: " + m + " (ตรวจสิทธิ์กล้อง/ลอง Chrome/Safari)");
+          releaseWakeLock();
+        }
+      });
       scannerModal.addEventListener("click", function (ev) {
         // คลิกพื้นหลังเพื่อปิด
         if (ev.target === scannerModal) closeScanner();
