@@ -443,6 +443,23 @@
       </main>
     </div>
 
+    <!-- Scanner Modal (ต้องอยู่ก่อน <script> เพื่อให้ JS หา element ได้ทันที) -->
+    <div id="scannerModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="สแกนบาร์โค้ด">
+      <div class="modal-card">
+        <div class="modal-head">
+          <div class="modal-title">สแกนบาร์โค้ด</div>
+          <button id="scanCloseBtn" class="modal-close" type="button">ปิด</button>
+        </div>
+        <div class="modal-body">
+          <div class="video-wrap">
+            <video id="scannerVideo" playsinline muted autoplay></video>
+            <div class="scan-frame" aria-hidden="true"><div class="scan-box"></div></div>
+          </div>
+          <div id="scanStatus" class="scan-hint">กำลังเตรียมกล้อง…</div>
+        </div>
+      </div>
+    </div>
+
     <script>
       // =========================
       // ตั้งค่า API URL ตรงนี้
@@ -478,6 +495,9 @@
       let zxingReader = null;
       let zxingControls = null;
       let zxingLoading = false;
+      let scannerStopRequested = false;
+      let reopenAttempts = 0;
+      let wakeLock = null;
 
       /**
        * normalizeInput:
@@ -549,15 +569,46 @@
 
       // ===== Barcode scanning (Camera) =====
       function setScanStatus(msg) {
+        if (!scanStatus) return;
         scanStatus.textContent = msg;
       }
 
       function showScanner() {
+        if (!scannerModal) {
+          console.error("Scanner modal element not found (#scannerModal).");
+          setCard({
+            type: "warning",
+            icon: "!",
+            title: "เปิดกล้องไม่ได้",
+            codeText: codeInput.value || "-",
+            nameText: "-",
+            noteText: "ไม่พบหน้าต่างสแกน (scannerModal) กรุณารีเฟรชหน้า หรืออัปเดตไฟล์หน้าเว็บให้เป็นเวอร์ชันล่าสุด",
+          });
+          return;
+        }
         scannerModal.classList.remove("hidden");
       }
 
       function hideScanner() {
+        if (!scannerModal) return;
         scannerModal.classList.add("hidden");
+      }
+
+      async function requestWakeLock() {
+        try {
+          if (navigator.wakeLock && navigator.wakeLock.request) {
+            wakeLock = await navigator.wakeLock.request("screen");
+          }
+        } catch (_) {
+          // ไม่รองรับก็ไม่เป็นไร
+        }
+      }
+
+      async function releaseWakeLock() {
+        try {
+          if (wakeLock && wakeLock.release) await wakeLock.release();
+        } catch (_) {}
+        wakeLock = null;
       }
 
       function isSecureContextOk() {
@@ -613,6 +664,59 @@
         }
       }
 
+      async function getBackCameraStream() {
+        // พยายามเปิด "กล้องหลัง" ให้มากที่สุด:
+        // 1) facingMode exact
+        // 2) facingMode ideal
+        // 3) เลือก deviceId จาก enumerateDevices (หลังขอสิทธิ์แล้ว label จะมีค่า)
+        const tryConstraints = async (video) => {
+          return await navigator.mediaDevices.getUserMedia({
+            video,
+            audio: false,
+          });
+        };
+
+        try {
+          return await tryConstraints({
+            facingMode: { exact: "environment" },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          });
+        } catch (_) {}
+
+        try {
+          return await tryConstraints({
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          });
+        } catch (_) {}
+
+        // ขอ stream ทั่วไปก่อนเพื่อให้ browser ขอ permission (บางเครื่อง enumerateDevices label จะว่างถ้ายังไม่ขอสิทธิ์)
+        let tmp = null;
+        try {
+          tmp = await tryConstraints({ video: true });
+        } catch (_) {
+          // ถ้าขอแบบทั่วไปยังไม่ได้ ก็ให้ throw ไป
+        }
+        if (tmp) {
+          try { tmp.getTracks().forEach((t) => t.stop()); } catch (_) {}
+        }
+
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const cams = devices.filter((d) => d.kind === "videoinput");
+        // เลือกตัวที่ label ดูเป็นกล้องหลัง (keyword) ถ้าไม่มี ให้เลือกตัวสุดท้าย (มักเป็น rear)
+        const keyword = /(back|rear|environment)/i;
+        const preferred = cams.find((c) => keyword.test(c.label)) || cams[cams.length - 1];
+        if (!preferred) throw new Error("ไม่พบอุปกรณ์กล้อง (videoinput)");
+
+        return await tryConstraints({
+          deviceId: { exact: preferred.deviceId },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        });
+      }
+
       async function openScanner() {
         if (!isSecureContextOk()) {
           showScanner();
@@ -625,18 +729,69 @@
           return;
         }
 
+        scannerStopRequested = false;
+        reopenAttempts = 0;
         showScanner();
         setScanStatus("กำลังขอสิทธิ์กล้อง…");
 
         try {
-          // ขอใช้กล้องหลัง
-          scannerStream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: { ideal: "environment" } },
-            audio: false,
-          });
+          // ปิดของเดิม (กันกดซ้อน)
+          if (scannerStream) {
+            try { scannerStream.getTracks().forEach((t) => t.stop()); } catch (_) {}
+            scannerStream = null;
+          }
+
+          await requestWakeLock();
+          scannerStream = await getBackCameraStream();
 
           scannerVideo.srcObject = scannerStream;
           await scannerVideo.play();
+
+          // ถ้ากล้องดับเอง/track ended → แจ้งให้รู้ (ช่วย debug มือถือ/บางบราวเซอร์)
+          try {
+            const vt = scannerStream.getVideoTracks && scannerStream.getVideoTracks()[0];
+            if (vt) {
+              vt.onended = () => {
+                if (scannerStopRequested) return;
+                // บางเครื่อง track จะ end เองเร็ว ๆ (เช่น in-app browser/permission/OS)
+                scannerRunning = false;
+                const aliveMs = Date.now() - requestStartedAt;
+                // auto-retry 1 ครั้ง (กันกรณีเปิดแป๊บเดียวแล้วดับ)
+                if (reopenAttempts < 1) {
+                  reopenAttempts += 1;
+                  setScanStatus("กล้องหลุด กำลังเปิดใหม่…");
+                  // หน่วงนิดให้ browser ปลด resource ก่อน
+                  setTimeout(async () => {
+                    try {
+                      if (scannerStream) {
+                        try { scannerStream.getTracks().forEach((t) => t.stop()); } catch (_) {}
+                        scannerStream = null;
+                      }
+                      scannerStream = await getBackCameraStream();
+                      scannerVideo.srcObject = scannerStream;
+                      await scannerVideo.play();
+                      scannerRunning = true;
+                      setScanStatus("เล็งบาร์โค้ดให้อยู่ในกรอบ แล้วรอระบบอ่าน…");
+                      if ("BarcodeDetector" in window) {
+                        scanLoop();
+                      }
+                    } catch (e) {
+                      const m = (e && e.name) ? String(e.name) : String(e);
+                      setScanStatus("กล้องหยุดทำงานเอง และเปิดใหม่ไม่สำเร็จ: " + m + " (ลองใช้ Chrome/Safari ปกติ ไม่ใช่ in-app browser)");
+                    }
+                  }, 220);
+                  return;
+                }
+                setScanStatus("กล้องหยุดทำงานเอง (track ended) — ลองกดสแกนใหม่ หรือเปิดผ่าน Chrome/Safari ปกติ");
+              };
+              vt.onmute = () => {
+                // บางเครื่อง mute ชั่วคราว
+              };
+              vt.onunmute = () => {
+                // กลับมาได้
+              };
+            }
+          } catch (_) {}
 
           scannerRunning = true;
           lastScanAt = 0;
@@ -670,9 +825,13 @@
               const raw = result.getText ? result.getText() : String(result.text || "");
               const code = extract8DigitCode(raw);
               if (/^\d{8}$/.test(code)) {
+                setScanStatus("พบรหัส: " + code + " กำลังตรวจสอบ…");
                 codeInput.value = code;
-                closeScanner();
-                handleCheck();
+                // หน่วงนิดให้ผู้ใช้เห็นว่าอ่านได้แล้ว (ลดความรู้สึกว่ากล้องดับเอง)
+                setTimeout(() => {
+                  closeScanner();
+                  handleCheck();
+                }, 180);
               }
             }
             // err ปล่อยผ่านได้ (ZXing จะ throw ตอนยังหาไม่เจอเป็นปกติ)
@@ -687,6 +846,7 @@
       }
 
       function closeScanner() {
+        scannerStopRequested = true;
         scannerRunning = false;
         // หยุด ZXing ถ้ากำลังทำงาน
         try {
@@ -703,6 +863,7 @@
           } catch (_) {}
         }
         scannerStream = null;
+        releaseWakeLock();
         hideScanner();
       }
 
@@ -951,23 +1112,6 @@
         }
       });
     </script>
-
-    <!-- Scanner Modal -->
-    <div id="scannerModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="สแกนบาร์โค้ด">
-      <div class="modal-card">
-        <div class="modal-head">
-          <div class="modal-title">สแกนบาร์โค้ด</div>
-          <button id="scanCloseBtn" class="modal-close" type="button">ปิด</button>
-        </div>
-        <div class="modal-body">
-          <div class="video-wrap">
-            <video id="scannerVideo" playsinline muted></video>
-            <div class="scan-frame" aria-hidden="true"><div class="scan-box"></div></div>
-          </div>
-          <div id="scanStatus" class="scan-hint">กำลังเตรียมกล้อง…</div>
-        </div>
-      </div>
-    </div>
   </body>
 </html>
 
