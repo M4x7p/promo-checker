@@ -439,7 +439,7 @@
                   aria-label="รหัสสินค้า 8 หลัก"
                 />
               </div>
-              <button id="scanBtn" class="btn-secondary" type="button">สแกนบาร์โค้ด (กล้อง)</button>
+              <button id="scanBtn" class="btn-secondary" type="button">สแกนบาร์โค้ด (beta) </button>
               <button id="checkBtn" class="btn" type="button">ตรวจสอบ</button>
             </div>
 
@@ -1113,7 +1113,7 @@
         if (found) {
           setCard({
             type: "danger",
-            icon: "✖",
+            icon: "❌",
             title: "ไม่ร่วมโปรโมชั่น",
             codeText: code,
             nameText: name ? name : "(ไม่ระบุ)",
@@ -1122,7 +1122,7 @@
         } else {
           setCard({
             type: "success",
-            icon: "✔",
+            icon: "✔️",
             title: "ร่วมโปรโมชั่น",
             codeText: code,
             nameText: "- (ไม่มีในรายการยกเว้น)",
