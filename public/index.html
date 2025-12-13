@@ -129,6 +129,108 @@
         gap: 12px;
       }
 
+      .btn-secondary {
+        width: 100%;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        background: rgba(0, 0, 0, 0.22);
+        color: rgba(255, 255, 255, 0.90);
+        font-family: inherit;
+        font-weight: 800;
+        font-size: 15px;
+        border-radius: 14px;
+        padding: 12px 14px;
+        cursor: pointer;
+        transition: transform 120ms ease, filter 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+      }
+      .btn-secondary:hover { border-color: rgba(249, 115, 22, 0.40); }
+      .btn-secondary:active { transform: translateY(1px) scale(0.99); }
+      .btn-secondary:disabled {
+        cursor: not-allowed;
+        filter: grayscale(0.2) brightness(0.85);
+      }
+
+      /* Scanner modal */
+      .modal {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.62);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 18px 14px;
+        z-index: 9999;
+      }
+      .modal.hidden { display: none; }
+      .modal-card {
+        width: 100%;
+        max-width: 520px;
+        background: rgba(12, 18, 32, 0.92);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 18px;
+        box-shadow: 0 22px 60px rgba(0,0,0,0.55);
+        overflow: hidden;
+      }
+      .modal-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 14px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+      }
+      .modal-title {
+        font-weight: 800;
+        letter-spacing: 0.2px;
+      }
+      .modal-close {
+        border: 0;
+        background: rgba(255,255,255,0.08);
+        color: rgba(255,255,255,0.9);
+        border: 1px solid rgba(255,255,255,0.12);
+        padding: 8px 10px;
+        border-radius: 12px;
+        cursor: pointer;
+        font-family: inherit;
+        font-weight: 800;
+      }
+      .modal-body {
+        padding: 12px 14px 14px;
+      }
+      .video-wrap {
+        position: relative;
+        border-radius: 16px;
+        overflow: hidden;
+        border: 1px solid rgba(255, 255, 255, 0.10);
+        background: rgba(0,0,0,0.35);
+        aspect-ratio: 3 / 4;
+      }
+      video#scannerVideo {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+      .scan-frame {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        pointer-events: none;
+      }
+      .scan-box {
+        width: min(86%, 360px);
+        height: 120px;
+        border-radius: 14px;
+        border: 2px solid rgba(249, 115, 22, 0.85);
+        box-shadow: 0 0 0 6px rgba(249, 115, 22, 0.12);
+      }
+      .scan-hint {
+        margin: 10px 2px 0;
+        color: rgba(255,255,255,0.78);
+        font-size: 13px;
+        line-height: 1.35;
+      }
+      .scan-hint b { color: rgba(255,255,255,0.92); }
+
       .field {
         position: relative;
       }
@@ -327,6 +429,7 @@
                   aria-label="รหัสสินค้า 8 หลัก"
                 />
               </div>
+              <button id="scanBtn" class="btn-secondary" type="button">สแกนบาร์โค้ด (กล้อง)</button>
               <button id="checkBtn" class="btn" type="button">ตรวจสอบ</button>
             </div>
 
@@ -359,8 +462,22 @@
       let requestStartedAt = 0;
 
       const codeInput = document.getElementById("codeInput");
+      const scanBtn = document.getElementById("scanBtn");
       const checkBtn = document.getElementById("checkBtn");
       const resultArea = document.getElementById("resultArea");
+
+      // ========= Scanner state =========
+      const scannerModal = document.getElementById("scannerModal");
+      const scanCloseBtn = document.getElementById("scanCloseBtn");
+      const scannerVideo = document.getElementById("scannerVideo");
+      const scanStatus = document.getElementById("scanStatus");
+      let scannerStream = null;
+      let scannerRunning = false;
+      let detector = null;
+      let lastScanAt = 0;
+      let zxingReader = null;
+      let zxingControls = null;
+      let zxingLoading = false;
 
       /**
        * normalizeInput:
@@ -399,6 +516,7 @@
       function setBusy(isBusy) {
         checkBtn.disabled = isBusy;
         codeInput.disabled = isBusy;
+        scanBtn.disabled = isBusy;
       }
 
       function isApiConfigured() {
@@ -427,6 +545,198 @@
           jsonpScriptEl.parentNode.removeChild(jsonpScriptEl);
         }
         jsonpScriptEl = null;
+      }
+
+      // ===== Barcode scanning (Camera) =====
+      function setScanStatus(msg) {
+        scanStatus.textContent = msg;
+      }
+
+      function showScanner() {
+        scannerModal.classList.remove("hidden");
+      }
+
+      function hideScanner() {
+        scannerModal.classList.add("hidden");
+      }
+
+      function isSecureContextOk() {
+        // กล้องบนเว็บต้องเป็น HTTPS (ยกเว้น localhost)
+        return window.isSecureContext || location.hostname === "localhost";
+      }
+
+      function extract8DigitCode(rawValue) {
+        const digits = String(rawValue || "").replace(/\D/g, "");
+        if (/^\d{8}$/.test(digits)) return digits;
+        // บางบาร์โค้ดเป็น EAN-13/UPC-A → เอา 8 หลักท้ายสุดมา (ตามการใช้งานหน้างาน)
+        if (digits.length > 8) return digits.slice(-8);
+        // ถ้ามีเลขติดกัน >= 8 ให้ดึงช่วง 8 หลักแรกที่เจอ
+        const m = digits.match(/\d{8}/);
+        return m ? m[0] : "";
+      }
+
+      async function loadZxingIfNeeded() {
+        // โหลด ZXing (fallback) เมื่อ BarcodeDetector ไม่รองรับ
+        // - ใช้ UMD build ผ่าน jsDelivr
+        if (window.ZXingBrowser) return window.ZXingBrowser;
+        if (zxingLoading) {
+          // รอจนโหลดเสร็จ
+          return new Promise((resolve, reject) => {
+            const started = Date.now();
+            const t = setInterval(() => {
+              if (window.ZXingBrowser) {
+                clearInterval(t);
+                resolve(window.ZXingBrowser);
+              } else if (Date.now() - started > 12000) {
+                clearInterval(t);
+                reject(new Error("ZXing load timeout"));
+              }
+            }, 120);
+          });
+        }
+
+        zxingLoading = true;
+        try {
+          await new Promise((resolve, reject) => {
+            const s = document.createElement("script");
+            // เวอร์ชันถูก pin เพื่อลดความเสี่ยง break จาก latest
+            s.src = "https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/index.min.js";
+            s.async = true;
+            s.onload = () => resolve();
+            s.onerror = () => reject(new Error("โหลด ZXing ไม่สำเร็จ"));
+            document.head.appendChild(s);
+          });
+          if (!window.ZXingBrowser) throw new Error("ZXing ไม่พร้อมใช้งาน");
+          return window.ZXingBrowser;
+        } finally {
+          zxingLoading = false;
+        }
+      }
+
+      async function openScanner() {
+        if (!isSecureContextOk()) {
+          showScanner();
+          setScanStatus("ต้องเปิดผ่าน HTTPS เพื่อใช้กล้อง (แนะนำ Cloudflare/GitHub Pages) หรือพิมพ์รหัสแทน");
+          return;
+        }
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          showScanner();
+          setScanStatus("เบราวเซอร์นี้ไม่รองรับการเปิดกล้อง กรุณาใช้ Chrome/Edge หรือพิมพ์รหัสแทน");
+          return;
+        }
+
+        showScanner();
+        setScanStatus("กำลังขอสิทธิ์กล้อง…");
+
+        try {
+          // ขอใช้กล้องหลัง
+          scannerStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: "environment" } },
+            audio: false,
+          });
+
+          scannerVideo.srcObject = scannerStream;
+          await scannerVideo.play();
+
+          scannerRunning = true;
+          lastScanAt = 0;
+
+          // 1) ใช้ BarcodeDetector ถ้ามี (เร็ว/ลื่น)
+          if ("BarcodeDetector" in window) {
+            if (!detector) {
+              const formats = ["ean_13", "ean_8", "code_128", "upc_a", "upc_e", "qr_code"];
+              detector = new BarcodeDetector({ formats });
+            }
+            setScanStatus("เล็งบาร์โค้ดให้อยู่ในกรอบ แล้วรอระบบอ่าน…");
+            scanLoop();
+            return;
+          }
+
+          // 2) Fallback: ZXing (รองรับ iOS Safari/บราวเซอร์อื่น ๆ ที่ไม่มี BarcodeDetector)
+          setScanStatus("กำลังโหลดตัวอ่านบาร์โค้ดเพิ่มเติม…");
+          const ZX = await loadZxingIfNeeded();
+          if (!zxingReader) {
+            zxingReader = new ZX.BrowserMultiFormatReader();
+          }
+
+          setScanStatus("เล็งบาร์โค้ดให้อยู่ในกรอบ แล้วรอระบบอ่าน…");
+          // decodeFromVideoElementContinuously ใช้ video element ที่เราเปิดไว้แล้ว
+          zxingControls = await zxingReader.decodeFromVideoElementContinuously(scannerVideo, (result, err, controls) => {
+            // controls อาจส่งมาให้ใช้งาน—เก็บไว้สำหรับ stop
+            if (controls) zxingControls = controls;
+            if (!scannerRunning) return;
+
+            if (result) {
+              const raw = result.getText ? result.getText() : String(result.text || "");
+              const code = extract8DigitCode(raw);
+              if (/^\d{8}$/.test(code)) {
+                codeInput.value = code;
+                closeScanner();
+                handleCheck();
+              }
+            }
+            // err ปล่อยผ่านได้ (ZXing จะ throw ตอนยังหาไม่เจอเป็นปกติ)
+          });
+        } catch (err) {
+          const msg = (err && err.name) ? String(err.name) : String(err);
+          setScanStatus("เปิดกล้องไม่สำเร็จ: " + msg + " (อนุญาตกล้องแล้วลองใหม่)");
+          scannerRunning = false;
+          // ปิด stream ถ้ามีค้าง
+          closeScanner();
+        }
+      }
+
+      function closeScanner() {
+        scannerRunning = false;
+        // หยุด ZXing ถ้ากำลังทำงาน
+        try {
+          if (zxingControls && typeof zxingControls.stop === "function") zxingControls.stop();
+        } catch (_) {}
+        zxingControls = null;
+        if (scannerVideo) {
+          try { scannerVideo.pause(); } catch (_) {}
+          scannerVideo.srcObject = null;
+        }
+        if (scannerStream) {
+          try {
+            scannerStream.getTracks().forEach((t) => t.stop());
+          } catch (_) {}
+        }
+        scannerStream = null;
+        hideScanner();
+      }
+
+      async function scanLoop() {
+        if (!scannerRunning) return;
+
+        // throttle: ไม่ต้อง detect ทุกเฟรม (ช่วยประหยัดแบต/ลื่นขึ้น)
+        const now = Date.now();
+        if (now - lastScanAt < 180) {
+          requestAnimationFrame(scanLoop);
+          return;
+        }
+        lastScanAt = now;
+
+        try {
+          if (scannerVideo.readyState >= 2) {
+            const results = await detector.detect(scannerVideo);
+            if (results && results.length) {
+              const raw = results[0].rawValue || "";
+              const code = extract8DigitCode(raw);
+              if (/^\d{8}$/.test(code)) {
+                // เติมรหัส + ตรวจสอบอัตโนมัติ
+                codeInput.value = code;
+                closeScanner();
+                handleCheck();
+                return;
+              }
+            }
+          }
+        } catch (_err) {
+          // เงียบไว้ก่อน: บางเครื่อง detect จะ throw เป็นครั้งคราว
+        }
+
+        requestAnimationFrame(scanLoop);
       }
 
       function handleCheck() {
@@ -613,6 +923,12 @@
       });
 
       checkBtn.addEventListener("click", handleCheck);
+      scanBtn.addEventListener("click", openScanner);
+      scanCloseBtn.addEventListener("click", closeScanner);
+      scannerModal.addEventListener("click", function (ev) {
+        // คลิกพื้นหลังเพื่อปิด
+        if (ev.target === scannerModal) closeScanner();
+      });
 
       // โฟกัส input ทันที (สะดวกในพื้นร้าน)
       window.addEventListener("load", function () {
@@ -635,6 +951,23 @@
         }
       });
     </script>
+
+    <!-- Scanner Modal -->
+    <div id="scannerModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="สแกนบาร์โค้ด">
+      <div class="modal-card">
+        <div class="modal-head">
+          <div class="modal-title">สแกนบาร์โค้ด</div>
+          <button id="scanCloseBtn" class="modal-close" type="button">ปิด</button>
+        </div>
+        <div class="modal-body">
+          <div class="video-wrap">
+            <video id="scannerVideo" playsinline muted></video>
+            <div class="scan-frame" aria-hidden="true"><div class="scan-box"></div></div>
+          </div>
+          <div id="scanStatus" class="scan-hint">กำลังเตรียมกล้อง…</div>
+        </div>
+      </div>
+    </div>
   </body>
 </html>
 
