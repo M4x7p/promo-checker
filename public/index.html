@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#0b1220" />
     <title>Check No Promotion • DoHome นครสวรรค์</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <link rel="icon" type="image/png" href="favicon.png" />
+    <link rel="icon" type="image/x-icon" href="favicon.ico" />
 
     <!-- Google Font: Prompt -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -115,6 +118,37 @@
 
       .panel-inner {
         padding: 18px;
+      }
+
+      /* Tabs UI */
+      .tabs {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 16px;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 0;
+      }
+      .tab {
+        flex: 1;
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        font-family: inherit;
+        font-size: 14px;
+        font-weight: 600;
+        padding: 10px 12px;
+        cursor: pointer;
+        border-bottom: 2px solid transparent;
+        transition: color 150ms ease, border-color 150ms ease;
+        position: relative;
+        top: 1px;
+      }
+      .tab:hover {
+        color: var(--text);
+      }
+      .tab.active {
+        color: var(--orange);
+        border-bottom-color: var(--orange);
       }
 
       .hint {
@@ -424,7 +458,11 @@
 
         <section class="panel" aria-label="Promo Checker">
           <div class="panel-inner">
-            <p class="hint">กรอกรหัสสินค้า <b>8 หลัก</b> แล้วกด “ตรวจสอบ” (หรือกด Enter)</p>
+            <div class="tabs" role="tablist" aria-label="เลือกโปรโมชั่น">
+              <button id="tabCoupon" class="tab active" type="button" role="tab" aria-selected="true" aria-controls="promo-content">โปรโมชั่นคูปอง</button>
+              <button id="tabFamily" class="tab" type="button" role="tab" aria-selected="false" aria-controls="promo-content">โปรโมชั่นครอบครัวช่าง</button>
+            </div>
+            <p class="hint">กรอกรหัสสินค้า <b>8 หลัก</b> แล้วกด "ตรวจสอบ" (หรือกด Enter)</p>
 
             <div class="form">
               <div class="field">
@@ -480,7 +518,7 @@
       // =========================
       // Max: เปลี่ยนเป็น URL จริงจาก Apps Script Web App (ลงท้ายด้วย /exec)
       // ตัวอย่าง: https://script.google.com/macros/s/AKfycbxxxxxxxxxxxxxxxxxxxx/exec
-      const API_URL = "https://script.google.com/macros/s/AKfycby8yW6HSiy-ryBw7cy8anLvPkZwZuGDJE7jAc1QR69nkDqMGvh-JCSGwTtLqUSuXr74/exec";
+      const API_URL = "https://script.google.com/macros/s/AKfycbxaR636vHj-IwLM5JO9Kqo5qWYfQaW-LpbGP-aqej5JdzEmbpvJwWQh6yUxbsMFjss/exec";
 
       // ปรับได้ตามสภาพหน้างาน: มือถือ/เน็ตช้าแนะนำ 15–25 วินาที
       const JSONP_TIMEOUT_MS = 20000;
@@ -492,10 +530,19 @@
       let statusInterval = null;
       let requestStartedAt = 0;
 
+      // Promo state
+      let currentPromoKey = "coupon"; // default = coupon
+      const PROMO_CONFIG = {
+        coupon: { key: "coupon", name: "โปรโมชั่นคูปอง" },
+        family: { key: "family", name: "โปรโมชั่นครอบครัวช่าง" }
+      };
+
       const codeInput = document.getElementById("codeInput");
       const scanBtn = document.getElementById("scanBtn");
       const checkBtn = document.getElementById("checkBtn");
       const resultArea = document.getElementById("resultArea");
+      const tabCoupon = document.getElementById("tabCoupon");
+      const tabFamily = document.getElementById("tabFamily");
 
       // ========= Scanner state =========
       const scannerModal = document.getElementById("scannerModal");
@@ -528,8 +575,9 @@
         return String(value || "").replace(/\D/g, "").slice(0, 8);
       }
 
-      function setCard({ type, icon, title, codeText, nameText, noteText }) {
+      function setCard({ type, icon, title, promoName, codeText, nameText, noteText }) {
         const safeTitle = title || "";
+        const safePromo = promoName || "";
         const safeCode = codeText || "";
         const safeName = nameText || "";
         const safeNote = noteText || "";
@@ -540,6 +588,7 @@
             <div>
               <h2>${escapeHtml(safeTitle)}</h2>
               <div class="rows">
+                ${safePromo ? `<div><b>โปรโมชั่น:</b> ${escapeHtml(safePromo)}</div>` : ""}
                 <div><b>รหัสที่ตรวจสอบ:</b> ${escapeHtml(safeCode)}</div>
                 <div><b>ชื่อสินค้า:</b> ${escapeHtml(safeName)}</div>
               </div>
@@ -981,6 +1030,7 @@
             type: "warning",
             icon: "!",
             title: "กรอกข้อมูลไม่ถูกต้อง",
+            promoName: PROMO_CONFIG[currentPromoKey].name,
             codeText: normalized || "-",
             nameText: "-",
             noteText: "กรุณากรอกรหัสสินค้าให้ครบ 8 หลัก",
@@ -993,6 +1043,7 @@
             type: "warning",
             icon: "!",
             title: "ยังไม่ได้ตั้งค่า API",
+            promoName: PROMO_CONFIG[currentPromoKey].name,
             codeText: normalized,
             nameText: "-",
             noteText: "ให้แก้ตัวแปร API_URL ในไฟล์นี้เป็น URL จริงจาก Apps Script (ลงท้าย /exec) ก่อนใช้งาน",
@@ -1012,11 +1063,24 @@
 
         // ใช้ JSONP เพื่อเลี่ยงปัญหา CORS:
         // สร้าง <script src="...&callback=handlePromoResult">
+        const uniqueId = Date.now() + "_" + Math.random().toString(36).substr(2, 9);
+        const callbackName = "__promo_cb_" + uniqueId;
+        
+        // กำหนด global callback function
+        window[callbackName] = function(result) {
+          // ลบ callback function หลังใช้งาน
+          try { delete window[callbackName]; } catch (_) {}
+          handlePromoResult(result);
+        };
+
         const url =
           API_URL +
           "?code=" +
           encodeURIComponent(normalized) +
-          "&callback=handlePromoResult" +
+          "&promo=" +
+          encodeURIComponent(currentPromoKey) +
+          "&callback=" +
+          encodeURIComponent(callbackName) +
           "&_=" +
           Date.now(); // กัน cache
 
@@ -1034,15 +1098,18 @@
         // ถ้าโหลด script ไม่ได้ (เช่น URL ผิด) จะเข้า onerror
         s.onerror = function () {
           if (requestId !== activeRequestId) return;
+          // ลบ callback ที่สร้างไว้
+          try { delete window[callbackName]; } catch (_) {}
           setBusy(false);
           setCard({
             type: "warning",
             icon: "!",
             title: "เรียก API ไม่สำเร็จ",
+            promoName: PROMO_CONFIG[currentPromoKey].name,
             codeText: normalized,
             nameText: "-",
             noteText:
-              "ถ้าคอมใช้ได้แต่มือถือไม่ได้: ให้ Deploy Apps Script เป็น Web app และตั้ง Who has access = Anyone (กันปัญหา third‑party cookies). API: " +
+              "เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ โปรดลองใหม่อีกครั้ง หรือตรวจสอบว่า Deploy Apps Script เป็น Web app และตั้ง Who has access = Anyone. API: " +
               apiShort(),
           });
           clearJsonp();
@@ -1051,15 +1118,18 @@
         // ตั้ง timeout กันค้าง (กรณี API ไม่ตอบกลับ)
         jsonpTimeout = setTimeout(function () {
           if (requestId !== activeRequestId) return;
+          // ลบ callback ที่สร้างไว้
+          try { delete window[callbackName]; } catch (_) {}
           setBusy(false);
           setCard({
             type: "warning",
             icon: "!",
             title: "หมดเวลาในการตรวจสอบ",
+            promoName: PROMO_CONFIG[currentPromoKey].name,
             codeText: normalized,
             nameText: "-",
             noteText:
-              "เน็ตมือถือช้า/Apps Script เพิ่งเริ่มทำงาน (cold start) ลองใหม่อีกครั้ง หรือใช้ Wi‑Fi. API: " + apiShort(),
+              "เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ โปรดลองใหม่อีกครั้ง (เน็ตมือถือช้า/Apps Script cold start อาจใช้เวลา 10–20 วินาที). API: " + apiShort(),
           });
           clearJsonp();
         }, JSONP_TIMEOUT_MS);
@@ -1070,9 +1140,9 @@
 
       /**
        * ฟังก์ชันนี้จะถูกเรียกโดย Apps Script (JSONP):
-       * handlePromoResult({ ok:true, code:"10012977", found:true/false, name:"..." })
+       * handlePromoResult({ ok:true, promo:"coupon", promoName:"...", code:"10012977", found:true/false, name:"..." })
        */
-      window.handlePromoResult = function (result) {
+      function handlePromoResult(result) {
         // หมายเหตุ: JSONP ไม่มี requestId แนบมา → เราใช้ activeRequestId เพื่อกันการตอบกลับจาก request เก่า
         // (ถ้ากดซ้อนเร็ว ๆ request เก่าอาจตอบกลับทีหลัง)
         if (!result || typeof result !== "object") {
@@ -1081,6 +1151,7 @@
             type: "warning",
             icon: "!",
             title: "ข้อมูลตอบกลับไม่ถูกต้อง",
+            promoName: PROMO_CONFIG[currentPromoKey].name,
             codeText: codeInput.value || "-",
             nameText: "-",
             noteText: "API ส่งข้อมูลผิดรูปแบบ กรุณาแจ้งผู้ดูแลระบบ",
@@ -1099,6 +1170,7 @@
             type: "warning",
             icon: "!",
             title: "ระบบตรวจสอบมีปัญหา",
+            promoName: result.promoName || PROMO_CONFIG[currentPromoKey].name,
             codeText: (result.code || codeInput.value || "-"),
             nameText: "-",
             noteText: result.message ? String(result.message) : "ไม่สามารถตรวจสอบได้ในขณะนี้",
@@ -1109,12 +1181,14 @@
         const code = result.code ? String(result.code) : (codeInput.value || "-");
         const found = result.found === true;
         const name = result.name != null ? String(result.name).trim() : "";
+        const promoName = result.promoName || PROMO_CONFIG[currentPromoKey].name;
 
         if (found) {
           setCard({
             type: "danger",
-            icon: "❌",
+            icon: "✖",
             title: "ไม่ร่วมโปรโมชั่น",
+            promoName: promoName,
             codeText: code,
             nameText: name ? name : "(ไม่ระบุ)",
             noteText: "สินค้าอยู่ในรายการยกเว้น โปรดตรวจสอบกับหัวหน้าแผนกหรือฝ่ายการตลาดอีกครั้ง",
@@ -1122,14 +1196,15 @@
         } else {
           setCard({
             type: "success",
-            icon: "✅",
+            icon: "✔",
             title: "ร่วมโปรโมชั่น",
+            promoName: promoName,
             codeText: code,
             nameText: "- (ไม่มีในรายการยกเว้น)",
             noteText: "สามารถเสนอขายตามเงื่อนไขโปรโมชั่นได้",
           });
         }
-      };
+      }
 
       // ป้องกัน XSS ในการ render ข้อความ (ถึงแม้ข้อมูลมาจากเราเองก็ตาม)
       function escapeHtml(str) {
@@ -1154,6 +1229,24 @@
           handleCheck();
         }
       });
+
+      // Tab switching
+      function switchPromo(promoKey) {
+        if (!PROMO_CONFIG[promoKey]) return;
+        currentPromoKey = promoKey;
+        
+        // Update tab UI
+        tabCoupon.classList.toggle("active", promoKey === "coupon");
+        tabCoupon.setAttribute("aria-selected", promoKey === "coupon" ? "true" : "false");
+        tabFamily.classList.toggle("active", promoKey === "family");
+        tabFamily.setAttribute("aria-selected", promoKey === "family" ? "true" : "false");
+        
+        // Clear result when switching
+        resultArea.innerHTML = "";
+      }
+
+      tabCoupon.addEventListener("click", () => switchPromo("coupon"));
+      tabFamily.addEventListener("click", () => switchPromo("family"));
 
       checkBtn.addEventListener("click", handleCheck);
       scanBtn.addEventListener("click", openScanner);
